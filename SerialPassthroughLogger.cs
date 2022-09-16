@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using System.IO.Ports;
@@ -43,36 +42,35 @@ namespace SerialTee
             _tasks = new List<Task>(3);
         }
 
-        private void Forward(Source source, Stream sender, Stream receiver)
+        private void Forward(Source source, SerialPort sender, SerialPort receiver)
         {
+            
             DataSegment s = new DataSegment() { Source = source, TimeStamp = DateTime.Now.Subtract(_startTime)};
             int i;
             int b;
-            for (i = 0; i < s.Data.MaxLenght && (b = sender.ReadByte()) != -1; i++)
+            int readLength = Math.Min(s.Data.MaxLenght, sender.BytesToRead);
+            if (readLength == 0)
             {
-                s.Data[i] = (byte)b;
-                s.Data.Length = i;
+                Thread.Sleep(5);
+                return;
             }
-            if (i == 0)
-                Thread.Sleep(10);
+                
+            for (i = 0; i < readLength && (b = sender.ReadByte()) != -1; i++)
+                s.Data.Add((byte) b);
             _logQueue.Add(s);
-            receiver.Write(s.Data.AsSpan().Slice(0, i));
+            receiver.BaseStream.Write(s.Data.AsSpan().Slice(0, i));
         }
         
-        private async Task ForwardToBus()
+        private async Task ForwardBothDirections()
         {
             await Task.Run(() =>
             {
-                while (!_stopEvent.IsSet) Forward(Source.PC, _virtualPort.BaseStream, _busPort.BaseStream);
-            });
-            
-        }
-
-        private async Task ForwardToPc()
-        {
-            await Task.Run(() =>
-            {
-                while (!_stopEvent.IsSet) Forward(Source.BUS, _busPort.BaseStream, _virtualPort.BaseStream);
+                while (!_stopEvent.IsSet)
+                {
+                    Forward(Source.PC, _virtualPort, _busPort);
+                    Forward(Source.BUS, _busPort, _virtualPort);
+                }
+                _logQueue.CompleteAdding();
             });
         }
 
@@ -80,9 +78,17 @@ namespace SerialTee
         {
             await Task.Run(() =>
             {
-                while (_logQueue.TryTake(out var s))
-                    _logger.Information("{Timestamp,10:0.000} {Source} {Payload}", s.TimeStamp.TotalSeconds, s.Source,
-                        s.Data);
+                try
+                {
+                    while (!_logQueue.IsAddingCompleted)
+                    {
+                        var s = _logQueue.Take();
+                        _logger.Information("{Timestamp,10:0.000} {Source} {Payload}", s.TimeStamp.TotalSeconds,
+                            s.Source,
+                            s.Data);
+
+                    }
+                } catch (InvalidOperationException) {}
             });
         }
 
@@ -90,8 +96,7 @@ namespace SerialTee
         {
             _startTime = DateTime.Now;
             _tasks.Add(Consume());
-            _tasks.Add(ForwardToBus());
-            _tasks.Add(ForwardToPc());
+            _tasks.Add(ForwardBothDirections());
         }
 
         public async Task Stop()
