@@ -85,7 +85,7 @@ namespace SerialTee
                         var s = _logQueue.Take();
                         _logger.Information("{Timestamp,10:0.000} {Source} {Payload}", s.TimeStamp.TotalSeconds,
                             s.Source,
-                            s.Data);
+                            s.Data.ToHexString());
 
                     }
                 } catch (InvalidOperationException) {}
